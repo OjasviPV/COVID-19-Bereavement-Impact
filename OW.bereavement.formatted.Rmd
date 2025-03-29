@@ -1,0 +1,872 @@
+---
+title: "Outcome-wide analysis of bereavement during the COVID-19 pandemic"
+author: "Koichiro Shiba and Ojasvi Pranav Vachharajani"
+date: "1/12/2023"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE)
+```
+
+```{r load-packages, include=FALSE}
+# Load required packages
+library(tidyverse)
+library(gtsummary)
+library(mice)
+library(survey)
+library(anesrake)
+library(ltmle)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ggsci)
+```
+
+```{r load-data, include=FALSE}
+# Load original data
+df.original <- haven::read_dta("C:\\Shiba\\Covid19_Data_30Nov2020.dta")
+```
+
+# Study Overview
+
+This study examines the impact of bereavement during the COVID-19 pandemic on various well-being outcomes. We conducted three separate analyses to understand short-term, medium-term, and post-lockdown effects:
+
+1. **Analysis 1: Short-term effect during the lockdown**
+   - Covariates measured at Week 1
+   - Bereavement exposure assessed during Weeks 3-6
+   - Outcomes measured at Week 7
+
+2. **Analysis 2: Short-term effect post-lockdown**
+   - Covariates measured at Week 16
+   - Bereavement exposure assessed during Weeks 18-21
+   - Outcomes measured at Week 22
+
+3. **Analysis 3: Medium-term effect**
+   - Covariates measured at Week 1
+   - Bereavement exposure assessed during Weeks 3-6
+   - Outcomes measured at Week 15
+
+## Data Preparation and Variable Creation
+
+```{r data-preparation}
+# Create derived variables
+df <- df.original %>% 
+  mutate(
+    # Calculate aggregate measures
+    stressorsminor = rowSums(select(., stressorsminor___1:stressorsminor___16)),
+    stressorsmajor = rowSums(select(., stressorsmajor___1:stressorsmajor___16)),
+    
+    # Create binary measures
+    volunteer = ifelse(acta8 == 0, "No", "Yes"),
+    caring = ifelse(acta7 == 0, "No", "Yes"),
+    socdistance = ifelse(socdist %in% c(0,1,2), "Yes", "No"),
+    socisolation = as.numeric(followingisolation),         
+    smoking = ifelse(smokechange == 3, "More than usual", "As usual or less/don't smoke"),
+    drinking = ifelse(alcoholchange == 3, "More than usual", "As usual or less/don't drink"),
+    diet = ifelse(dietchange_3 == 1, "Less healthy than usual", "As usual or more healthy"),
+    self.harm = ifelse(harm1 == 1, "Not at all", "At least one day"),
+    pa.1 = ifelse(actb3 == 0, "No", "Yes"),
+    pa.2 = ifelse(actb4 == 0, "No", "Yes"),
+    pa.3 = ifelse(actb6 == 0, "No", "Yes"),         
+    sleep.bin = ifelse(sleep %in% c(1,2), "Good Sleep", "Average or Poor Sleep")
+  ) %>% 
+  mutate_at(vars(onssat, onshappy, onsworth, socisolation), as.numeric) %>% 
+  mutate_at(vars(smoking, drinking, diet, self.harm, sleep.bin, pa.1, pa.2, pa.3), as.factor)
+
+# Create additional variables
+df <- df %>% 
+  mutate(
+    illness = rowSums(select(., contains("illness___"))),
+    illness = ifelse(illness___11 == 1, 0, illness),
+    edu = factor(edu, labels = c("GCSE or below", "A levels or equivalent", "Degree or above")),
+    lowincome = factor(lowincome, labels = c("≥£30 000", "<£30 000")),
+    socfreq.three = ifelse(socfreq == 1, "Every day", 
+                          ifelse(socfreq %in% c(2,3), "Once a week or more often", 
+                                "Less than once a week")),
+    Service.attendance.category = ifelse(religattend <= 2, "At least once a week", 
+                                       ifelse(religattend <= 4, "Less than once a week", 
+                                             "Not at all")),
+    Service.attendance.category = factor(Service.attendance.category),
+    current.smoking = ifelse(smoker == 1, "Non-smoker", 
+                           ifelse(smoker == 2, "Ex-smoker", "Current smoker"))
+  )
+
+# Helper function to get unique IDs for specified weeks
+get_unique_ids <- function(df, weeks) {
+  df %>%
+    filter(week %in% weeks) %>%
+    select(record_id) %>%
+    distinct() %>%
+    pull(record_id)
+}
+```
+
+## Analysis 1: Short-term Effect During Lockdown
+
+```{r analysis1-sample-selection}
+# Get IDs for participants who completed required waves
+ids_week1 <- get_unique_ids(df, 1)
+ids_week7 <- get_unique_ids(df, 7)
+ids_week15 <- get_unique_ids(df, 15)  # Also needed for medium-term analysis
+
+# Filter to include participants who completed both baseline and outcome waves
+df_lockdown <- df %>% 
+  filter(record_id %in% ids_week1,
+         record_id %in% ids_week7)
+
+# Get IDs for participants who completed at least one wave during exposure period
+ids_lockdown <- get_unique_ids(df_lockdown, c(3, 4, 5, 6))
+df_lockdown <- df_lockdown %>% filter(record_id %in% ids_lockdown)
+
+# Create bereavement exposure variable
+df_exposure <- df_lockdown %>% 
+  filter(week %in% c(3, 4, 5, 6)) %>% 
+  group_by(record_id) %>% 
+  # If a participant reported bereavement in any of these weeks, classify as exposed
+  mutate(loss.pandemic = ifelse(sum(adverse___8, na.rm = TRUE) != 0, 1, 0)) %>%
+  ungroup() %>% 
+  select(record_id, loss.pandemic) %>% 
+  distinct()
+
+df_lockdown <- df_lockdown %>% left_join(df_exposure)
+
+# Exclude participants who experienced bereavement at baseline (weeks 1-2)
+ids_preexposed <- df_lockdown %>% 
+  filter(week %in% c(1, 2)) %>% 
+  mutate(preexposed = ifelse(adverse___8 == 1, 1, 0)) %>% 
+  filter(preexposed == 1) %>% 
+  select(record_id) %>% 
+  distinct() %>% 
+  pull(record_id)
+
+df_lockdown <- df_lockdown %>% filter(!(record_id %in% ids_preexposed))
+
+# Exclude participants with loss in the past year before the pandemic
+ids_lossprioryear <- df_lockdown %>% 
+  filter(lifeevent2 != 1) %>% 
+  select(record_id) %>% 
+  distinct() %>% 
+  pull(record_id)
+
+df_lockdown <- df_lockdown %>% 
+  mutate(
+    loss.prioryear = ifelse(record_id %in% ids_lossprioryear, 1, 0),
+    exclude.flag = ifelse(loss.pandemic == 1, 0, ifelse(loss.prioryear == 1, 1, 0))
+  ) %>% 
+  filter(exclude.flag == 0)
+```
+
+### Create Survey Weights
+
+```{r create-weights}
+# Create survey weights for analysis 1
+df_wgt <- df_lockdown %>% 
+  filter(week == 1) %>% 
+  select(record_id, female, country, agegrp4, nonwhite, edu) %>% 
+  mutate_at(vars(female, country, agegrp4, nonwhite, edu), as.integer) %>%
+  mutate_at(vars(female, nonwhite), function(x) x + 1) %>% 
+  as.data.frame() 
+
+df_wgt$caseid <- 1:nrow(df_wgt)
+
+# Target population proportions
+female_target <- c(0.494, 0.506)
+country_target <- c(0.843, 0.047, 0.082, 0.028)
+agegrp4_target <- c(0.195, 0.261, 0.241, 0.303)
+nonwhite_target <- c(0.872, 0.128)
+edu_target <- c(0.327, 0.339, 0.334)
+
+targets <- list(female_target, country_target, agegrp4_target, nonwhite_target, edu_target)
+names(targets) <- c("female", "country", "agegrp4", "nonwhite", "edu")
+
+# Generate weights using raking
+raked_output <- anesrake(targets, df_wgt, caseid = df_wgt$caseid)
+df_wgt$wgt <- raked_output$weightvec
+df_wgt <- df_wgt %>% select(record_id, wgt)
+```
+
+### Table 1: Baseline Characteristics
+
+```{r baseline-characteristics}
+# Create a survey design object
+svy_df <- df_lockdown %>% 
+  filter(week == 1) %>% 
+  left_join(df_wgt) %>%
+  mutate_at(vars(closefriends, alcohol), as.numeric)
+
+svy_df <- survey::svydesign(
+  id = ~record_id,
+  weights = ~wgt,
+  data = svy_df
+)
+
+# Create the baseline characteristics table
+tbl_baseline <- svy_df %>% 
+  tbl_svysummary(
+    by = loss.pandemic,
+    statistic = list(all_continuous() ~ "{mean} ({sd})"),
+    missing_text = "(Missing)",
+    include = c(
+      age, female, nonwhite, alone, edu, employed, keyworker, lowincome, illness,
+      Service.attendance.category, socfreq.three, closefriends, BFI_n, BFI_e, 
+      BFI_o, BFI_a, BFI_c, onssat, onsworth, support, lonely, volunteer, caring,
+      socisolation, PHQ, GAD, stressorsminor, stressorsmajor, current.smoking,
+      alcohol, smoking, drinking, pa.1, pa.2, pa.3, sleep.bin
+    ),
+    label = list(
+      Service.attendance.category ~ "Pre-pandemic Service Attendance",
+      age ~ "Age",
+      female ~ "Female Gender",
+      nonwhite ~ "Non-white Ethnicity",
+      edu ~ "Education",
+      lowincome ~ "Low Income (<£30 000)",
+      illness ~ "Number of health conditions",
+      socfreq.three ~ "Frequency of meeting up with people in usual life",
+      closefriends ~ "Number of close friends",
+      current.smoking ~ "Smoking status",
+      alcohol ~ "Number of alcoholic drinks in the past week",
+      stressorsmajor ~ "Stress major", 
+      stressorsminor ~ "Stress minor",
+      onssat ~ "Satisfaction with life",
+      onsworth ~ "Meaning",
+      volunteer ~ "Volunteering",
+      caring ~ "Caring",
+      socisolation ~ "Compliance with social isolation",
+      smoking ~ "No unhealthy smoking change",
+      drinking ~ "No unhealthy drinking change",
+      pa.1 ~ "Gentle physical activity",
+      pa.2 ~ "High intensity physical activity",
+      pa.3 ~ "Exercising at home",      
+      sleep.bin ~ "Good Sleep"
+    ),
+    type = list(
+      lonely ~ "continuous", 
+      illness ~ "continuous", 
+      socisolation ~ "continuous",
+      sleep.bin ~ "dichotomous", 
+      drinking ~ "dichotomous", 
+      smoking ~ "dichotomous", 
+      lowincome ~ "dichotomous"
+    ),
+    value = list(
+      sleep.bin ~ "Good Sleep", 
+      smoking ~ "As usual or less/don't smoke", 
+      drinking ~ "As usual or less/don't drink", 
+      lowincome ~ "<£30 000"
+    ),
+    missing = "no"   
+  ) %>% 
+  bold_labels() %>% 
+  add_overall() %>% 
+  modify_header(
+    update = list(label ~ "**Pre-baseline Characteristics**")
+  ) %>% 
+  modify_spanning_header(starts_with("stat_") ~ "**Bereavement during the lockdown**")
+
+tbl_baseline
+```
+
+### Outcome Distribution at Week 7
+
+```{r outcome-distribution}
+# Create a survey design object for outcome assessment
+svy_df_week7 <- df_lockdown %>% 
+  filter(week == 7) %>% 
+  left_join(df_wgt)
+
+svy_df_week7 <- survey::svydesign(
+  id = ~record_id,
+  weights = ~wgt,
+  data = svy_df_week7
+)
+
+# Create the outcome distribution table
+tbl_outcomes <- svy_df_week7 %>% 
+  tbl_svysummary(
+    include = c(
+      onssat, onshappy, onsworth, support, lonely, volunteer, caring, socisolation,
+      PHQ, GAD, stressorsminor, stressorsmajor, self.harm, smoking, drinking, 
+      diet, pa.1, pa.2, pa.3, sleep.bin, loss.pandemic
+    ),
+    by = loss.pandemic,
+    statistic = list(all_continuous() ~ "{mean} ({sd})"),
+    missing_text = "(Missing)",
+    label = list(
+      stressorsmajor ~ "Stress major", 
+      stressorsminor ~ "Stress minor",
+      onssat ~ "Satisfaction with life",
+      onshappy ~ "Happiness",
+      onsworth ~ "Meaning",
+      volunteer ~ "Volunteering",
+      caring ~ "Caring",
+      socisolation ~ "Compliance with social isolation",
+      smoking ~ "No unhealthy smoking change",
+      drinking ~ "No unhealthy drinking change",
+      diet ~ "No unhealthy diet change",
+      self.harm ~ "Self-harm ideation",
+      pa.1 ~ "Gentle physical activity",
+      pa.2 ~ "High intensity physical activity",
+      pa.3 ~ "Exercising at home",
+      sleep.bin ~ "Good Sleep"
+    ),
+    type = list(
+      lonely ~ "continuous", 
+      socisolation ~ "continuous",
+      sleep.bin ~ "dichotomous", 
+      drinking ~ "dichotomous", 
+      smoking ~ "dichotomous"
+    ),
+    value = list(
+      sleep.bin ~ "Good Sleep", 
+      smoking ~ "As usual or less/don't smoke", 
+      drinking ~ "As usual or less/don't drink", 
+      diet ~ "As usual or more healthy", 
+      self.harm ~ "At least one day"
+    ),
+    missing = "no"
+  ) %>% 
+  bold_labels() %>% 
+  modify_header(
+    update = list(label ~ "**Outcome at Week 7**")
+  ) %>% 
+  add_p() %>% 
+  add_overall() %>% 
+  modify_spanning_header(starts_with("stat_") ~ "**Bereavement during the lockdown**")
+
+tbl_outcomes
+```
+
+## Prepare Data for Analysis 2 and 3
+
+```{r prepare-data-analysis2-3}
+# Function to create wide format datasets for analysis
+create_wide_dataset <- function(df, week1, week2, df_wgt) {
+  # For standardizing continuous outcomes
+  scale2 <- function(x, na.rm = TRUE) (x - mean(x, na.rm = na.rm)) / sd(x, na.rm = na.rm)
+  
+  # Create wide-format outcomes dataset
+  df_wide_outcomes <- df %>% 
+    filter(week %in% c(week1, week2)) %>% 
+    select(record_id, week, PHQ, GAD, stressorsminor, stressorsmajor, onssat, onshappy, onsworth, 
+           support, lonely, smoking, drinking, diet, self.harm, sleep.bin, socisolation, 
+           volunteer, caring, pa.1, pa.2, pa.3) %>% 
+    mutate(
+      smoking = ifelse(smoking == "As usual or less/don't smoke", 1, 0),
+      drinking = ifelse(drinking == "As usual or less/don't drink", 1, 0),
+      diet = ifelse(diet == "As usual or more healthy", 1, 0),
+      self.harm = ifelse(self.harm == "Not at all", 0, 1),
+      sleep.bin = ifelse(sleep.bin == "Good Sleep", 1, 0),
+      volunteer = ifelse(volunteer == "Yes", 1, 0),
+      caring = ifelse(caring == "Yes", 1, 0),
+      pa.1 = ifelse(pa.1 == "Yes", 1, 0),
+      pa.2 = ifelse(pa.2 == "Yes", 1, 0),
+      pa.3 = ifelse(pa.3 == "Yes", 1, 0)
+    ) %>% 
+    distinct_at(vars(record_id, week), .keep_all = TRUE)
+  
+  # Standardize continuous outcomes and create wide format
+  df_wide_outcomes <- df_wide_outcomes %>%
+    mutate_at(vars(PHQ, GAD, stressorsminor, stressorsmajor, onssat, onshappy, onsworth, 
+                  support, lonely, socisolation), scale2) %>%
+    # Recode weeks for consistent analysis structure
+    mutate(week = ifelse(week == week2, 7, 1)) %>%
+    pivot_wider(
+      names_from = week,
+      values_from = c(PHQ, GAD, stressorsminor, stressorsmajor, onssat, onshappy, onsworth, 
+                     support, lonely, smoking, drinking, diet, self.harm, sleep.bin, 
+                     socisolation, volunteer, caring, pa.1, pa.2, pa.3)
+    )
+  
+  # Get covariates
+  df_wide_cov <- df %>% 
+    filter(week == week1) %>% 
+    select(record_id, loss.pandemic, age, female, nonwhite, alone, edu, employed, keyworker, 
+           lowincome, illness, Service.attendance.category, current.smoking, alcohol,
+           socfreq.three, closefriends, BFI_n, BFI_e, BFI_o, BFI_a, BFI_c) %>% 
+    mutate_if(is.character, as.factor)
+  
+  # For post-lockdown dataset, we need loss.nonpandemic instead
+  if ("loss.nonpandemic" %in% colnames(df)) {
+    df_wide_cov <- df %>% 
+      filter(week == week1) %>% 
+      select(record_id, loss.nonpandemic, age, female, nonwhite, alone, edu, employed, keyworker, 
+             lowincome, illness, Service.attendance.category, current.smoking, alcohol,
+             socfreq.three, closefriends, BFI_n, BFI_e, BFI_o, BFI_a, BFI_c) %>% 
+      mutate_if(is.character, as.factor)
+  }
+  
+  # Join datasets and add weights
+  df_wide <- df_wide_outcomes %>% 
+    left_join(df_wide_cov) %>%
+    left_join(df_wgt)
+  
+  return(df_wide)
+}
+
+# Create wide format dataset for short-term effect during lockdown
+df_wide1 <- create_wide_dataset(df_lockdown, week1 = 1, week2 = 7, df_wgt)
+```
+
+Now we'll prepare the remaining analyses and create the combined dataset for multiple imputation.
+
+```{r prepare-analysis2}
+# ANALYSIS 2: Post-lockdown 
+# Create dataset for short-term effect post-lockdown
+
+# Get IDs for participants in required weeks
+ids_week16 <- get_unique_ids(df, 16)
+ids_week22 <- get_unique_ids(df, 22)
+ids_postlockdown <- get_unique_ids(df, c(18, 19, 20, 21))
+
+# Filter to include only participants in all required weeks
+df_postlockdown <- df %>% 
+  filter(record_id %in% ids_week16,
+         record_id %in% ids_week22,
+         record_id %in% ids_postlockdown)
+
+# Create exposure variable
+df_exposure <- df_postlockdown %>% 
+  filter(week %in% c(18, 19, 20, 21)) %>% 
+  group_by(record_id) %>% 
+  mutate(loss.nonpandemic = ifelse(sum(adverse___8, na.rm = TRUE) != 0, 1, 0)) %>%
+  ungroup() %>% 
+  select(record_id, loss.nonpandemic) %>% 
+  distinct()
+
+df_postlockdown <- df_postlockdown %>% left_join(df_exposure)
+
+# Exclude participants who had loss in weeks 1-17
+ids_preexposed <- df_postlockdown %>% 
+  filter(week %in% c(1:17)) %>% 
+  mutate(preexposed = ifelse(adverse___8 == 1, 1, 0)) %>% 
+  filter(preexposed == 1) %>% 
+  select(record_id) %>% 
+  distinct() %>% 
+  pull(record_id)
+
+df_postlockdown <- df_postlockdown %>% filter(!(record_id %in% ids_preexposed))
+
+# Exclude participants with loss in the past year
+ids_lossprioryear <- df_postlockdown %>% 
+  filter(lifeevent2 != 1) %>% 
+  select(record_id) %>% 
+  distinct() %>% 
+  pull(record_id)
+
+df_postlockdown <- df_postlockdown %>% 
+  mutate(loss.prioryear = ifelse(record_id %in% ids_lossprioryear, 1, 0),
+         exclude.flag = ifelse(loss.nonpandemic == 1, 0, ifelse(loss.prioryear == 1, 1, 0))) %>% 
+  filter(exclude.flag == 0)
+
+# Create weights for post-lockdown analysis
+df_wgt_postlockdown <- df_postlockdown %>% 
+  filter(week == 16) %>% 
+  select(record_id, female, country, agegrp4, nonwhite, edu) %>% 
+  mutate_at(vars(female, country, agegrp4, nonwhite, edu), as.integer) %>%
+  mutate_at(vars(female, nonwhite), function(x) x + 1) %>% 
+  as.data.frame() 
+
+df_wgt_postlockdown$caseid <- 1:nrow(df_wgt_postlockdown)
+raked_output <- anesrake(targets, df_wgt_postlockdown, caseid = df_wgt_postlockdown$caseid)
+df_wgt_postlockdown$wgt <- raked_output$weightvec
+df_wgt_postlockdown <- df_wgt_postlockdown %>% select(record_id, wgt)
+
+# Create wide format dataset for post-lockdown analysis
+df_wide2 <- create_wide_dataset(df_postlockdown, week1 = 16, week2 = 22, df_wgt_postlockdown)
+```
+
+```{r prepare-analysis3}
+# ANALYSIS 3: Medium-term effect
+# Create dataset for medium-term effect
+
+# Filter dataset for analysis 3 - using the same lockdown exposure as analysis 1
+df_midterm <- df_lockdown %>% 
+  filter(record_id %in% ids_week15)  # Ensure participants completed week 15
+
+# Create weights for medium-term analysis (using same as analysis 1)
+df_wgt_midterm <- df_wgt
+
+# Create wide format dataset for medium-term effect
+df_wide3 <- create_wide_dataset(df_midterm, week1 = 1, week2 = 15, df_wgt_midterm)
+```
+
+## Multiple Imputation and Targeted Maximum Likelihood Estimation
+
+```{r combined-dataset}
+# Combine datasets for multiple imputation
+df.wide.combined <- bind_rows(
+  df_wide1 %>% mutate(sample = 1, lockdown = 1, short = 1),
+  df_wide2 %>% mutate(sample = 2, lockdown = 0, short = 1) %>% rename(loss.pandemic = loss.nonpandemic),
+  df_wide3 %>% mutate(sample = 3, lockdown = 1, short = 0)
+)
+
+# Check missing data
+miss.check <- df.wide.combined %>% 
+  select(-record_id) %>% 
+  summarise_all(funs(sum(is.na(.)))) %>%
+  pivot_longer(
+    everything(),
+    names_to = "Variable",
+    values_to = "n.miss"
+  ) %>% 
+  arrange(desc(n.miss))
+
+# Exclude variables with complete missing data
+vars.ordered <- miss.check %>% 
+  filter(n.miss < nrow(df.wide.combined)) %>% 
+  select(Variable) %>% 
+  pull(Variable) %>% 
+  as.vector()
+
+# Set up data for imputation
+df.analytic <- df.wide.combined %>% 
+  select(all_of(vars.ordered), record_id)
+
+# Perform multiple imputation
+m <- 5
+set.seed(123)
+df.imputed <- df.analytic %>% 
+  mice(., m = m, pred = quickpred(., exclude = c("record_id")), print = FALSE)
+
+# Convert to long format
+df.imputed.long <- df.imputed %>% complete("long")
+```
+
+```{r tmle-functions}
+# TMLE analysis functions
+# Extract estimates from TMLE for continuous outcomes
+extract.estimates.ltmle <- function(model.output.TMLE) {
+  output.TMLE <- summary(model.output.TMLE)
+  output.TMLE <- output.TMLE$effect.measures
+  ATE.TMLE <- output.TMLE$ATE %>% as.data.frame()
+  return(ATE.TMLE)
+}
+
+# Extract estimates from TMLE for binary outcomes
+extract.estimates.ltmle.binary <- function(model.output.TMLE) {
+  output.TMLE <- summary(model.output.TMLE)
+  output.TMLE <- output.TMLE$effect.measures
+  RR.TMLE <- output.TMLE$RR %>% as.data.frame()
+  return(RR.TMLE)
+}
+
+# Function to perform TMLE analysis for continuous outcomes
+perform.TMLE <- function(outcome.name, sample.num) {
+  outcome <- paste(outcome.name, "_7", sep = "")  # week of outcome assessment
+  data <- df.imputed.long %>% 
+    filter(sample == sample.num) %>% 
+    mutate(Yvar = (!!as.name(outcome)))
+  
+  output <- data %>% 
+    group_nest(.imp) %>% 
+    mutate(
+      # Select relevant variables
+      data = map(data, function(x) x %>% select(
+        PHQ_1, GAD_1, stressorsmajor_1, stressorsminor_1, onssat_1, onsworth_1, 
+        support_1, lonely_1, smoking_1, drinking_1, sleep.bin_1, volunteer_1, 
+        caring_1, pa.1_1, pa.2_1, pa.3_1, Service.attendance.category, age, 
+        female, nonwhite, alone, edu, employed, keyworker, lowincome, illness, 
+        current.smoking, alcohol, socfreq.three, closefriends, BFI_n, BFI_e, 
+        BFI_o, BFI_a, BFI_c, loss.pandemic, Yvar
+      )),
+      # Run TMLE for each imputation
+      fit = map(data, function(x) x %>% ltmle(
+        Anodes = "loss.pandemic",
+        Ynodes = "Yvar",
+        abar = list(1, 0),
+        observation.weights = x$wgt
+      )),
+      # Extract estimates
+      estimate = map(fit, function(x) extract.estimates.ltmle(x))
+    ) 
+  
+  # Pool results across imputations
+  output <- output %>%
+    select(.imp, estimate) %>% 
+    unnest(estimate) %>% 
+    mutate(variance = std.dev^2) %>% 
+    summarise(
+      estimate.combined = mean(estimate),
+      Vw = sum(variance)/m,  # within-imputation variance
+      Vb = sum((estimate - mean(estimate))^2/(m-1)),  # between-imputation variance
+      Vt = Vw + (1 + 1/m)*Vb,  # total variance
+      SE.combined = sqrt(Vt),  # combined standard error
+      vm = (m-1)*(1 + (Vw/((1+1/m)*Vb)))^2,  # degrees of freedom
+      ci.low = estimate.combined - qt(0.975, vm)*SE.combined,  # lower CI
+      ci.up = estimate.combined + qt(0.975, vm)*SE.combined,  # upper CI
+      p.value = pt(-abs(estimate.combined/SE.combined), vm)*2  # p-value
+    ) %>% 
+    mutate_if(is.numeric, round, 3) %>% 
+    mutate(outcome = outcome.name) %>% 
+    select(outcome, estimate.combined, SE.combined, ci.low, ci.up, p.value)   
+  
+  return(output)
+}
+
+# Function to perform TMLE analysis for binary outcomes
+perform.TMLE.binary <- function(outcome.name, sample.num) {
+  outcome <- paste(outcome.name, "_7", sep = "")  # week of outcome assessment
+  data <- df.imputed.long %>% 
+    filter(sample == sample.num) %>% 
+    mutate(Yvar = (!!as.name(outcome)))
+  
+  output <- data %>% 
+    group_nest(.imp) %>% 
+    mutate(
+      # Select relevant variables
+      data = map(data, function(x) x %>% select(
+        PHQ_1, GAD_1, stressorsmajor_1, stressorsminor_1, onssat_1, onsworth_1, 
+        support_1, lonely_1, smoking_1, drinking_1, sleep.bin_1, volunteer_1, 
+        caring_1, pa.1_1, pa.2_1, pa.3_1, Service.attendance.category, age, 
+        female, nonwhite, alone, edu, employed, keyworker, lowincome, illness, 
+        current.smoking, alcohol, socfreq.three, closefriends, BFI_n, BFI_e, 
+        BFI_o, BFI_a, BFI_c, loss.pandemic, Yvar
+      )),
+      # Run TMLE for each imputation
+      fit = map(data, function(x) x %>% ltmle(
+        Anodes = "loss.pandemic",
+        Ynodes = "Yvar",
+        abar = list(1, 0),
+        observation.weights = x$wgt
+      )),
+      # Extract estimates
+      estimate = map(fit, function(x) extract.estimates.ltmle.binary(x))
+    ) 
+  
+  # Pool results across imputations
+  output <- output %>%
+    select(.imp, estimate) %>% 
+    unnest(estimate) %>% 
+    mutate(variance = std.dev^2) %>% 
+    summarise(
+      estimate.combined = mean(estimate),
+      Vw = sum(variance)/m,  # within-imputation variance
+      Vb = sum((log(estimate) - mean(log(estimate)))^2/(m-1)),  # between-imputation variance on log scale
+      Vt = Vw + (1 + 1/m)*Vb,  # total variance
+      SE.combined = sqrt(Vt),  # combined standard error
+      vm = (m-1)*(1 + (Vw/((1+1/m)*Vb)))^2,  # degrees of freedom
+      ci.low = exp(log(estimate.combined) - qt(0.975, vm)*SE.combined),  # lower CI
+      ci.up = exp(log(estimate.combined) + qt(0.975, vm)*SE.combined),  # upper CI
+      p.value = pt(-abs(log(estimate.combined)/SE.combined), vm)*2  # p-value
+    ) %>% 
+    mutate_if(is.numeric, round, 4) %>% 
+    mutate(outcome = outcome.name) %>% 
+    select(outcome, estimate.combined, SE.combined, ci.low, ci.up, p.value)   
+  
+  return(output)
+}
+```
+
+# Results
+
+## Analysis 1: Short-term Effect During Lockdown
+
+```{r analysis1-results}
+# Define outcomes
+continuous_outcomes <- c("onssat", "onshappy", "onsworth", "support", "lonely", 
+                        "socisolation", "PHQ", "GAD", "stressorsminor", "stressorsmajor")
+binary_outcomes <- c("volunteer", "caring", "self.harm", "smoking", "drinking", 
+                    "diet", "pa.1", "pa.2", "pa.3", "sleep.bin")
+
+# Run TMLE analysis for Analysis 1
+output.long <- bind_rows(
+  map_df(continuous_outcomes, ~perform.TMLE(.x, 1)),
+  map_df(binary_outcomes, ~perform.TMLE.binary(.x, 1))
+)
+
+# Format results
+output.long.main <- output.long %>% 
+  select(-SE.combined) %>% 
+  mutate(sig = ifelse(p.value*20 < 0.05, "***",  # Bonferroni correction
+                    ifelse(p.value < 0.01, "**",
+                          ifelse(p.value < 0.05, "*", "N.S."))))
+
+# Display results table  
+output.long.main %>% 
+  rename(Outcome = outcome,
+         Estimate = estimate.combined,
+         CI.low = ci.low,
+         CI.up = ci.up) %>% 
+  knitr::kable(caption = "Short-term Effects of Bereavement During Lockdown") %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Analysis 2: Short-term Effect Post-Lockdown
+
+```{r analysis2-results}
+# Run TMLE analysis for Analysis 2
+output.long <- bind_rows(
+  map_df(continuous_outcomes, ~perform.TMLE(.x, 2)),
+  map_df(binary_outcomes, ~perform.TMLE.binary(.x, 2))
+)
+
+# Format results
+output.long.postlockdown <- output.long %>% 
+  select(-SE.combined) %>% 
+  mutate(sig = ifelse(p.value*20 < 0.05, "***",  # Bonferroni correction
+                    ifelse(p.value < 0.01, "**",
+                          ifelse(p.value < 0.05, "*", "N.S."))))
+
+# Display results table
+output.long.postlockdown %>% 
+  rename(Outcome = outcome,
+         Estimate = estimate.combined,
+         CI.low = ci.low,
+         CI.up = ci.up) %>% 
+  knitr::kable(caption = "Short-term Effects of Bereavement Post-Lockdown") %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Analysis 3: Medium-term Effect
+
+```{r analysis3-results}
+# Run TMLE analysis for Analysis 3
+output.long <- bind_rows(
+  map_df(continuous_outcomes, ~perform.TMLE(.x, 3)),
+  map_df(binary_outcomes, ~perform.TMLE.binary(.x, 3))
+)
+
+# Format results
+output.long.midterm <- output.long %>% 
+  select(-SE.combined) %>% 
+  mutate(sig = ifelse(p.value*20 < 0.05, "***",  # Bonferroni correction
+                    ifelse(p.value < 0.01, "**",
+                          ifelse(p.value < 0.05, "*", "N.S."))))
+
+# Display results table
+output.long.midterm %>% 
+  rename(Outcome = outcome,
+         Estimate = estimate.combined,
+         CI.low = ci.low,
+         CI.up = ci.up) %>% 
+  knitr::kable(caption = "Medium-term Effects of Bereavement During Lockdown") %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Visualization
+
+```{r visualization, fig.height=8, fig.width=10}
+# Combine results from all analyses
+all_results <- rbind(
+  output.long.main %>% mutate(analysis = "Short-term during lockdown"),
+  output.long.midterm %>% mutate(analysis = "Medium-term"),
+  output.long.postlockdown %>% mutate(analysis = "Short-term post-lockdown")
+)
+
+# Create forest plot for continuous outcomes
+all_results %>%
+  filter(outcome %in% continuous_outcomes) %>%
+  mutate(
+    analysis = factor(analysis, 
+                    levels = c("Short-term during lockdown", "Short-term post-lockdown", "Medium-term")),
+    # Create more readable outcome labels
+    outcome_label = case_when(
+      outcome == "onssat" ~ "Life Satisfaction",
+      outcome == "onshappy" ~ "Happiness",
+      outcome == "onsworth" ~ "Life Meaning",
+      outcome == "support" ~ "Social Support",
+      outcome == "lonely" ~ "Loneliness",
+      outcome == "socisolation" ~ "Social Isolation",
+      outcome == "PHQ" ~ "Depression (PHQ)",
+      outcome == "GAD" ~ "Anxiety (GAD)",
+      outcome == "stressorsminor" ~ "Minor Stressors",
+      outcome == "stressorsmajor" ~ "Major Stressors",
+      TRUE ~ outcome
+    ),
+    # Order outcomes for visualization
+    outcome_label = factor(outcome_label, levels = c(
+      "Life Satisfaction", "Happiness", "Life Meaning", "Social Support", 
+      "Loneliness", "Social Isolation", "Depression (PHQ)", "Anxiety (GAD)", 
+      "Minor Stressors", "Major Stressors"
+    ))
+  ) %>%
+  ggplot(aes(x = outcome_label, y = estimate.combined, 
+            ymin = ci.low, ymax = ci.up, 
+            shape = analysis, color = analysis)) +
+  geom_pointrange(position = position_dodge(width = 0.6)) +
+  coord_flip() +
+  scale_color_nejm() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  labs(
+    x = "",
+    y = "Standardized Mean Difference",
+    color = "Analysis Period",
+    shape = "Analysis Period",
+    title = "Effect of Bereavement on Continuous Outcomes"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r binary-outcomes-plot, fig.height=8, fig.width=10}
+# Create forest plot for binary outcomes
+all_results %>%
+  filter(!(outcome %in% continuous_outcomes)) %>%
+  mutate(
+    analysis = factor(analysis, 
+                    levels = c("Short-term during lockdown", "Short-term post-lockdown", "Medium-term")),
+    # Create more readable outcome labels
+    outcome_label = case_when(
+      outcome == "volunteer" ~ "Volunteering",
+      outcome == "caring" ~ "Caring",
+      outcome == "self.harm" ~ "Self-harm Ideation",
+      outcome == "smoking" ~ "Healthy Smoking Behavior",
+      outcome == "drinking" ~ "Healthy Drinking Behavior",
+      outcome == "diet" ~ "Healthy Diet",
+      outcome == "pa.1" ~ "Gentle Physical Activity",
+      outcome == "pa.2" ~ "High Intensity Activity",
+      outcome == "pa.3" ~ "Home Exercise",
+      outcome == "sleep.bin" ~ "Good Sleep",
+      TRUE ~ outcome
+    ),
+    # Order outcomes for visualization
+    outcome_label = factor(outcome_label, levels = c(
+      "Volunteering", "Caring", "Self-harm Ideation", "Healthy Smoking Behavior",
+      "Healthy Drinking Behavior", "Healthy Diet", "Gentle Physical Activity", 
+      "High Intensity Activity", "Home Exercise", "Good Sleep"
+    ))
+  ) %>%
+  ggplot(aes(x = outcome_label, y = estimate.combined, 
+            ymin = ci.low, ymax = ci.up, 
+            shape = analysis, color = analysis)) +
+  geom_pointrange(position = position_dodge(width = 0.6)) +
+  coord_flip() +
+  scale_color_nejm() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  labs(
+    x = "",
+    y = "Risk Ratio",
+    color = "Analysis Period",
+    shape = "Analysis Period",
+    title = "Effect of Bereavement on Binary Outcomes"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+```
+
+# Discussion and Conclusion
+
+The results of this study reveal several important findings about the impact of bereavement during the COVID-19 pandemic:
+
+1. **Short-term effects during lockdown:** Bereavement during lockdown was primarily associated with declines in happiness and increases in minor stressors.
+
+2. **Medium-term effects:** The effects of bereavement during lockdown showed delayed impacts, with significant increases in social isolation and anxiety appearing in the medium-term analysis.
+
+3. **Post-lockdown effects:** Bereavement occurring after lockdown had different impacts than during lockdown, with stronger associations with depression, anxiety, and loneliness.
+
+These findings highlight the importance of timing in understanding bereavement effects during the pandemic and suggest that support services should be tailored to address both immediate and delayed effects on wellbeing.
