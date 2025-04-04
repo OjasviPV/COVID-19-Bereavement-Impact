@@ -26,10 +26,9 @@ These findings emphasize the importance of timing in bereavement support, sugges
 
 ## Repository Structure
 
-- `OW.bereavement.Rmd`: Original R Markdown file containing the complete analysis
-- `OW.bereavement.formatted.Rmd`: Reformatted R Markdown file with improved flow and organization
+- `OW.bereavement.Rmd`: R Markdown file containing the complete analysis
 - `Poster presentation.pdf`: PDF of the research poster presentation
-- `R/`: Directory containing organized R code
+- `R/`: Directory containing R code - same as the Rmd file
   - `data_preparation.R`: Functions for data loading, cleaning, and preparation
   - `analysis.R`: Implementation of statistical analyses including TMLE
   - `visualization.R`: Functions for creating tables and figures
@@ -99,15 +98,3 @@ This analysis uses data from the UK COVID Social Study, a longitudinal survey tr
 
 - Koichiro Shiba
 - Ojasvi Pranav Vachharajani
-
-## Citation
-
-If you use this code or reference this analysis, please cite:
-
-```
-Shiba, K., & Vachharajani, O. P. (2023). Associations of bereavement during and after COVID-19 lockdown with subsequent health and wellbeing among UK adults.
-```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
